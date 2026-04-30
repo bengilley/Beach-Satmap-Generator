@@ -33,7 +33,7 @@ from tkinter import Tk, StringVar, BooleanVar, Text
 from tkinter.ttk import Button, Checkbutton, Combobox, Entry, Frame, Label, LabelFrame, Notebook, Progressbar, Scrollbar, Spinbox
 
 APP_TITLE = "Beach Satmap Generator"
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.8"
 GENERATOR_EXPECTED_VERSION = "1.1.0"
 CUSTOM_PRESETS_FILE = "custom_profiles.json"
 LAUNCHER_SETTINGS_FILE = "launcher_settings.json"
@@ -753,7 +753,7 @@ class SatmapGui(Tk):
         # Signature créateurs / copyright affichée en bas à droite sur toutes les pages.
         self.signature_label = Label(
             bottom,
-            text=f"MIT License Copyright (c) 2026 Bengilley & SleepingWolf · Launcher v{APP_VERSION}",
+            text=f"2026 © Created by Bengilley & SleepingWolf · Launcher v{APP_VERSION}",
             font=("Segoe UI", 8),
             anchor="e",
         )
@@ -2183,9 +2183,14 @@ class SatmapGui(Tk):
             messagebox.showerror("Erreur de configuration", str(exc))
             return
 
-        missing = [p for p in [Path(self.heightmap_var.get()), Path(self.mask_var.get()), Path(self.satmap_var.get()), Path(self.layers_var.get())] if not p.exists()]
+        # Vérification finale identique à l'onglet Fichiers.
+        # Les chemins relatifs sont bien résolus depuis le dossier du launcher.
+        missing = self._missing_files(include_generator=False)
         if missing:
-            messagebox.showerror("Fichiers manquants", "Fichiers introuvables :\n" + "\n".join(self._display_path(p) for p in missing))
+            messagebox.showerror(
+                self._tr("Fichiers manquants"),
+                self._tr("Fichiers manquants ou chemins invalides :\n\n") + "\n".join(missing)
+            )
             return
 
         self.notebook.select(self.tab_output)
