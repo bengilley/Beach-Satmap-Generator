@@ -1,0 +1,6 @@
+Beach Satmap Generator
+
+Created by Bengilley & SleepingWolf.
+Licensed under the MIT License.
+
+Copyright (c) 2026 Bengilley & SleepingWolf

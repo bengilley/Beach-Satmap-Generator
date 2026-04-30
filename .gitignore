@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Launcher local settings / private user data
+launcher_settings.json
+custom_profiles.json
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+
+# Project source files - usually large/private
+input/*.asc
+input/*.png
+input/*.paa
+input/*.cfg
+!input/PLACE_FILES_HERE.txt
+
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db

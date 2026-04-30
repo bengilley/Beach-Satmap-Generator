@@ -1,0 +1,11 @@
+Place your project source files here:
+
+Required files:
+- heightmap.asc
+- mask.png
+- satmap.png
+- layers.cfg
+
+Notes:
+- These files are project-specific and should not be committed to GitHub if they are large or private.
+- The launcher starts with empty file paths by default. Select your files manually from the interface.
