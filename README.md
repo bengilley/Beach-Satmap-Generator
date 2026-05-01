@@ -27,6 +27,13 @@ For advanced information, technical behavior, internal logic, CLI options, prese
 This documentation is intended for advanced users, modders, maintainers, and contributors.
 
 ---
+## Download
+
+For normal users, download the release package from:
+
+**Releases > Beach Satmap Generator v1.7.7 > Assets > Beach-Satmap-Generator-v1.7.7.zip**
+
+Do not use **Code > Download ZIP** unless you want the raw GitHub repository archive.
 
 ## Quick start
 
