@@ -33,8 +33,12 @@ Exemple avec chemins personnalisés :
 
 import argparse
 import gc
+import json
 import re
 import random
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -55,12 +59,18 @@ except ImportError as exc:
 # =========================================================
 # CONFIG PAR DÉFAUT
 # =========================================================
-GENERATOR_VERSION = "1.1.0"
+GENERATOR_VERSION = "1.3.5"
 
 DEFAULT_HEIGHTMAP_PATH = "input/heightmap.asc"
 DEFAULT_MASK_PATH = "input/mask.png"
 DEFAULT_SATMAP_PATH = "input/satmap.png"
 DEFAULT_LAYERS_CFG_PATH = "input/layers.cfg"
+
+SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+LOSSLESS_MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff")
+LOSSY_MASK_EXTENSIONS = (".jpg", ".jpeg")
+REPORT_FILE_NAME = "RAPPORT_GENERATION_COMPLET.md"
+SETTINGS_JSON_NAME = "generation_settings.json"
 
 DEFAULT_OUTPUT_SATMAP = "satmap_final_10240.png"
 DEFAULT_OUTPUT_BEACH_MASK = "beach_mask_10240.png"
@@ -197,6 +207,67 @@ SAND_WET_RGB = np.array([190, 168, 145], dtype=np.float32)
 SAND_DRY_RGB = np.array([222, 204, 178], dtype=np.float32)
 SAND_SHELL_RGB = np.array([208, 196, 182], dtype=np.float32)
 
+# Presets couleur sable : permettent d'adapter le rendu satmap à différents types de sable.
+# Les valeurs sont RGB, volontairement éditables.
+SAND_COLOR_PRESETS = {
+    "belle_ile": {
+        "label": "Belle-Île / sable clair naturel",
+        "dry": [222, 204, 178],
+        "wet": [190, 168, 145],
+        "shell": [208, 196, 182],
+        "wet_beach": [181, 156, 128],
+        "seabed": [160, 120, 90],
+    },
+    "atlantic_light": {
+        "label": "Atlantique clair",
+        "dry": [230, 214, 184],
+        "wet": [196, 176, 150],
+        "shell": [220, 210, 196],
+        "wet_beach": [188, 164, 134],
+        "seabed": [170, 132, 98],
+    },
+    "golden": {
+        "label": "Sable doré",
+        "dry": [226, 190, 126],
+        "wet": [176, 140, 95],
+        "shell": [218, 200, 164],
+        "wet_beach": [166, 132, 92],
+        "seabed": [152, 112, 72],
+    },
+    "pale_white": {
+        "label": "Sable blanc / très clair",
+        "dry": [238, 230, 204],
+        "wet": [205, 194, 170],
+        "shell": [236, 230, 218],
+        "wet_beach": [196, 184, 160],
+        "seabed": [176, 160, 130],
+    },
+    "grey_shell": {
+        "label": "Sable gris / coquillier",
+        "dry": [200, 196, 184],
+        "wet": [158, 154, 145],
+        "shell": [220, 218, 210],
+        "wet_beach": [150, 145, 132],
+        "seabed": [128, 120, 108],
+    },
+    "dark_volcanic": {
+        "label": "Sable sombre / volcanique",
+        "dry": [112, 105, 96],
+        "wet": [70, 68, 66],
+        "shell": [150, 145, 135],
+        "wet_beach": [82, 76, 70],
+        "seabed": [74, 68, 62],
+    },
+    "red_ochre": {
+        "label": "Sable ocre / rouge",
+        "dry": [196, 128, 82],
+        "wet": [132, 82, 58],
+        "shell": [205, 176, 150],
+        "wet_beach": [144, 92, 62],
+        "seabed": [122, 76, 52],
+    },
+}
+
 # Eau / contouring : plusieurs teintes pour un dégradé mer -> plage plus naturel.
 WATER_DEEP_RGB = np.array([58, 88, 122], dtype=np.float32)
 WATER_MID_RGB = np.array([70, 112, 142], dtype=np.float32)
@@ -204,6 +275,292 @@ WATER_SHALLOW_RGB = np.array([93, 149, 156], dtype=np.float32)
 WATER_LAGOON_RGB = np.array([118, 181, 174], dtype=np.float32)
 WATER_SURF_RGB = np.array([156, 202, 190], dtype=np.float32)
 WET_BEACH_RGB = np.array([181, 156, 128], dtype=np.float32)
+
+# Presets couleur eau : permettent d'adapter le dégradé mer -> plage à différents biomes.
+# Les valeurs sont RGB, volontairement éditables.
+WATER_COLOR_PRESETS = {
+    "atlantic_belle_ile": {
+        "label": "Atlantique / Belle-Île",
+        "deep": [58, 88, 122],
+        "mid": [70, 112, 142],
+        "shallow": [93, 149, 156],
+        "lagoon": [118, 181, 174],
+        "surf": [156, 202, 190],
+        "seabed": [160, 120, 90],
+    },
+    "atlantic_open_ocean": {
+        "label": "Atlantique ouvert / bleu profond",
+        "deep": [28, 72, 112],
+        "mid": [45, 100, 135],
+        "shallow": [76, 135, 150],
+        "lagoon": [105, 165, 160],
+        "surf": [165, 205, 195],
+        "seabed": [135, 115, 90],
+    },
+    "atlantic_grey_coast": {
+        "label": "Côte atlantique grise / Manche",
+        "deep": [48, 70, 88],
+        "mid": [72, 96, 108],
+        "shallow": [105, 130, 125],
+        "lagoon": [132, 154, 145],
+        "surf": [178, 190, 178],
+        "seabed": [125, 115, 100],
+    },
+    "tropical_lagoon": {
+        "label": "Lagon tropical",
+        "deep": [20, 95, 145],
+        "mid": [35, 165, 185],
+        "shallow": [95, 220, 210],
+        "lagoon": [130, 235, 220],
+        "surf": [220, 245, 230],
+        "seabed": [210, 190, 130],
+    },
+    "caribbean_turquoise": {
+        "label": "Caraïbes / turquoise clair",
+        "deep": [0, 87, 143],
+        "mid": [18, 156, 188],
+        "shallow": [72, 218, 220],
+        "lagoon": [125, 238, 225],
+        "surf": [230, 248, 238],
+        "seabed": [218, 202, 145],
+    },
+    "maldives_atoll": {
+        "label": "Maldives / atoll sable blanc",
+        "deep": [5, 76, 132],
+        "mid": [25, 150, 190],
+        "shallow": [85, 225, 220],
+        "lagoon": [155, 242, 225],
+        "surf": [235, 250, 238],
+        "seabed": [225, 207, 150],
+    },
+    "coral_reef_shallow": {
+        "label": "Récif corallien / haut-fond",
+        "deep": [16, 80, 138],
+        "mid": [30, 145, 170],
+        "shallow": [95, 205, 190],
+        "lagoon": [150, 225, 205],
+        "surf": [225, 245, 225],
+        "seabed": [190, 165, 120],
+    },
+    "mediterranean_blue": {
+        "label": "Méditerranée / bleu minéral",
+        "deep": [25, 75, 138],
+        "mid": [42, 110, 165],
+        "shallow": [70, 155, 185],
+        "lagoon": [105, 190, 195],
+        "surf": [180, 220, 215],
+        "seabed": [150, 130, 95],
+    },
+    "aegean_clear": {
+        "label": "Mer Égée / bleu clair",
+        "deep": [18, 80, 150],
+        "mid": [35, 125, 180],
+        "shallow": [75, 175, 205],
+        "lagoon": [110, 205, 210],
+        "surf": [195, 230, 225],
+        "seabed": [165, 145, 105],
+    },
+    "adriatic_clear": {
+        "label": "Adriatique / bleu vert clair",
+        "deep": [35, 85, 120],
+        "mid": [55, 125, 150],
+        "shallow": [90, 170, 175],
+        "lagoon": [130, 200, 190],
+        "surf": [200, 225, 210],
+        "seabed": [155, 140, 110],
+    },
+    "red_sea_clear": {
+        "label": "Mer Rouge / eau très claire",
+        "deep": [15, 72, 132],
+        "mid": [28, 130, 170],
+        "shallow": [78, 190, 195],
+        "lagoon": [120, 220, 205],
+        "surf": [220, 240, 220],
+        "seabed": [190, 165, 115],
+    },
+    "pacific_deep": {
+        "label": "Pacifique profond",
+        "deep": [12, 48, 95],
+        "mid": [30, 80, 130],
+        "shallow": [62, 125, 155],
+        "lagoon": [90, 160, 165],
+        "surf": [160, 210, 200],
+        "seabed": [105, 95, 85],
+    },
+    "indian_ocean": {
+        "label": "Océan Indien",
+        "deep": [10, 70, 125],
+        "mid": [28, 125, 160],
+        "shallow": [70, 185, 190],
+        "lagoon": [115, 215, 200],
+        "surf": [220, 240, 225],
+        "seabed": [190, 175, 125],
+    },
+    "cold_ocean": {
+        "label": "Océan froid",
+        "deep": [35, 65, 85],
+        "mid": [55, 95, 115],
+        "shallow": [90, 135, 140],
+        "lagoon": [105, 155, 155],
+        "surf": [180, 205, 205],
+        "seabed": [120, 115, 105],
+    },
+    "north_sea_grey": {
+        "label": "Mer du Nord / gris vert",
+        "deep": [45, 65, 78],
+        "mid": [65, 88, 95],
+        "shallow": [92, 118, 112],
+        "lagoon": [120, 140, 130],
+        "surf": [170, 185, 175],
+        "seabed": [115, 105, 88],
+    },
+    "baltic_green": {
+        "label": "Baltique / vert froid",
+        "deep": [36, 70, 72],
+        "mid": [58, 100, 88],
+        "shallow": [90, 130, 100],
+        "lagoon": [125, 155, 115],
+        "surf": [178, 195, 165],
+        "seabed": [115, 105, 75],
+    },
+    "arctic_glacial": {
+        "label": "Arctique / eau glaciale",
+        "deep": [25, 70, 95],
+        "mid": [55, 115, 135],
+        "shallow": [100, 165, 170],
+        "lagoon": [145, 205, 200],
+        "surf": [220, 238, 230],
+        "seabed": [130, 130, 120],
+    },
+    "fjord_dark": {
+        "label": "Fjord / eau sombre",
+        "deep": [15, 42, 58],
+        "mid": [28, 65, 78],
+        "shallow": [55, 95, 100],
+        "lagoon": [85, 125, 120],
+        "surf": [150, 175, 165],
+        "seabed": [78, 74, 68],
+    },
+    "deep_ocean": {
+        "label": "Océan profond",
+        "deep": [18, 50, 82],
+        "mid": [35, 82, 116],
+        "shallow": [70, 130, 150],
+        "lagoon": [95, 165, 165],
+        "surf": [150, 205, 195],
+        "seabed": [115, 105, 88],
+    },
+    "black_sea_deep": {
+        "label": "Mer Noire / bleu sombre",
+        "deep": [18, 43, 70],
+        "mid": [32, 70, 90],
+        "shallow": [62, 105, 112],
+        "lagoon": [88, 130, 125],
+        "surf": [150, 175, 165],
+        "seabed": [90, 85, 72],
+    },
+    "muddy_water": {
+        "label": "Eau vaseuse / trouble",
+        "deep": [70, 85, 75],
+        "mid": [100, 110, 85],
+        "shallow": [135, 130, 95],
+        "lagoon": [155, 145, 105],
+        "surf": [190, 185, 150],
+        "seabed": [125, 105, 70],
+    },
+    "river_delta_silty": {
+        "label": "Delta / eau chargée en limon",
+        "deep": [78, 88, 70],
+        "mid": [112, 112, 78],
+        "shallow": [148, 136, 90],
+        "lagoon": [170, 150, 102],
+        "surf": [200, 190, 145],
+        "seabed": [135, 110, 70],
+    },
+    "mangrove_lagoon": {
+        "label": "Mangrove / lagune verte",
+        "deep": [38, 72, 58],
+        "mid": [70, 105, 72],
+        "shallow": [105, 132, 82],
+        "lagoon": [135, 155, 95],
+        "surf": [180, 190, 145],
+        "seabed": [105, 85, 55],
+    },
+    "amazon_brown": {
+        "label": "Fleuve tropical / brun organique",
+        "deep": [80, 62, 42],
+        "mid": [120, 88, 55],
+        "shallow": [155, 112, 70],
+        "lagoon": [180, 135, 90],
+        "surf": [210, 185, 145],
+        "seabed": [110, 82, 52],
+    },
+    "great_lakes_fresh": {
+        "label": "Grands lacs / eau douce",
+        "deep": [32, 75, 98],
+        "mid": [55, 110, 125],
+        "shallow": [90, 150, 145],
+        "lagoon": [125, 175, 160],
+        "surf": [185, 210, 195],
+        "seabed": [120, 115, 95],
+    },
+    "alpine_lake": {
+        "label": "Lac alpin / bleu vert clair",
+        "deep": [22, 76, 110],
+        "mid": [48, 125, 145],
+        "shallow": [95, 175, 170],
+        "lagoon": [135, 205, 190],
+        "surf": [210, 235, 220],
+        "seabed": [120, 125, 110],
+    },
+    "glacial_lake_milky": {
+        "label": "Lac glaciaire / turquoise laiteux",
+        "deep": [55, 98, 120],
+        "mid": [85, 135, 150],
+        "shallow": [130, 180, 180],
+        "lagoon": [170, 210, 200],
+        "surf": [225, 240, 230],
+        "seabed": [150, 150, 135],
+    },
+    "green_algae_lake": {
+        "label": "Lac végétal / algues vertes",
+        "deep": [35, 70, 45],
+        "mid": [65, 105, 55],
+        "shallow": [105, 140, 65],
+        "lagoon": [140, 165, 80],
+        "surf": [185, 195, 135],
+        "seabed": [90, 85, 55],
+    },
+    "volcanic_crater_lake": {
+        "label": "Lac volcanique / bleu sombre vert",
+        "deep": [12, 55, 72],
+        "mid": [25, 92, 95],
+        "shallow": [65, 135, 115],
+        "lagoon": [95, 170, 135],
+        "surf": [165, 210, 180],
+        "seabed": [60, 58, 55],
+    },
+    "salt_lake_pale": {
+        "label": "Lac salé / eau très pâle",
+        "deep": [88, 130, 140],
+        "mid": [125, 170, 165],
+        "shallow": [170, 210, 190],
+        "lagoon": [205, 230, 205],
+        "surf": [240, 245, 225],
+        "seabed": [220, 205, 165],
+    },
+    "dark_stormy": {
+        "label": "Mer sombre / tempête",
+        "deep": [25, 45, 60],
+        "mid": [40, 70, 85],
+        "shallow": [65, 95, 100],
+        "lagoon": [80, 115, 112],
+        "surf": [145, 165, 160],
+        "seabed": [85, 80, 70],
+    },
+}
+
+WATER_SEABED_RGB = HP_BEACH_RGB.copy()
 
 FIELD_PALETTE = [
     np.array([150, 130, 95], dtype=np.float32),
@@ -509,30 +866,66 @@ def get_natural_sand_color_vec(
 # =========================================================
 # TRAITEMENTS PRINCIPAUX
 # =========================================================
-def build_category_map(mask: np.ndarray, color_to_layer: dict, beach_layer_names: set[str], sand_source_layer_names: set[str], land_side_layer_names: set[str] | None = None):
+def build_category_map(mask: np.ndarray, color_to_layer: dict, beach_layer_names: set[str], sand_source_layer_names: set[str], land_side_layer_names: set[str] | None = None, mask_color_tolerance: float = 0.0):
     h, w, _ = mask.shape
 
     print("Construction vectorisée des catégories depuis layers.cfg...")
-    mask_key = rgb_to_key_arr(mask)
 
     category_id = np.full((h, w), CAT["field"], dtype=np.uint8)
     hp_sand_exact_mask = np.zeros((h, w), dtype=bool)
     land_side_exact_mask = np.zeros((h, w), dtype=bool)
     land_side_layer_names = land_side_layer_names or set()
+    tolerance = float(mask_color_tolerance or 0.0)
 
-    for rgb, layer_name in color_to_layer.items():
-        pixels = mask_key == rgb_to_key(rgb)
-        cat_name = classify_layer(layer_name, beach_layer_names, sand_source_layer_names, land_side_layer_names)
-        category_id[pixels] = CAT.get(cat_name, CAT["field"])
+    if tolerance <= 0.0:
+        mask_key = rgb_to_key_arr(mask)
+        for rgb, layer_name in color_to_layer.items():
+            pixels = mask_key == rgb_to_key(rgb)
+            cat_name = classify_layer(layer_name, beach_layer_names, sand_source_layer_names, land_side_layer_names)
+            category_id[pixels] = CAT.get(cat_name, CAT["field"])
 
-        if layer_name_matches(layer_name, sand_source_layer_names):
-            hp_sand_exact_mask |= pixels
-        if land_side_layer_names and layer_name_matches(layer_name, land_side_layer_names):
-            land_side_exact_mask |= pixels
+            if layer_name_matches(layer_name, sand_source_layer_names):
+                hp_sand_exact_mask |= pixels
+            if land_side_layer_names and layer_name_matches(layer_name, land_side_layer_names):
+                land_side_exact_mask |= pixels
 
-    del mask_key
+        del mask_key
+        gc.collect()
+        return category_id, hp_sand_exact_mask, land_side_exact_mask
+
+    print(f"Tolérance RGB mask activée : ±{tolerance}")
+    items = list(color_to_layer.items())
+    tol2 = int(round(tolerance * tolerance * 3.0))
+    chunk_rows = 512
+
+    for y0 in range(0, h, chunk_rows):
+        y1 = min(y0 + chunk_rows, h)
+        chunk = mask[y0:y1].astype(np.int16, copy=False)
+        best_dist = np.full((y1 - y0, w), tol2 + 1, dtype=np.int32)
+        best_idx = np.full((y1 - y0, w), -1, dtype=np.int16)
+
+        for idx, (rgb, _layer_name) in enumerate(items):
+            r, g, b = rgb
+            dr = chunk[..., 0].astype(np.int32) - int(r)
+            dg = chunk[..., 1].astype(np.int32) - int(g)
+            db = chunk[..., 2].astype(np.int32) - int(b)
+            dist = dr * dr + dg * dg + db * db
+            update = dist < best_dist
+            best_dist[update] = dist[update]
+            best_idx[update] = idx
+
+        for idx, (_rgb, layer_name) in enumerate(items):
+            pixels = best_idx == idx
+            if not np.any(pixels):
+                continue
+            cat_name = classify_layer(layer_name, beach_layer_names, sand_source_layer_names, land_side_layer_names)
+            category_id[y0:y1][pixels] = CAT.get(cat_name, CAT["field"])
+            if layer_name_matches(layer_name, sand_source_layer_names):
+                hp_sand_exact_mask[y0:y1] |= pixels
+            if land_side_layer_names and layer_name_matches(layer_name, land_side_layer_names):
+                land_side_exact_mask[y0:y1] |= pixels
+
     gc.collect()
-
     return category_id, hp_sand_exact_mask, land_side_exact_mask
 
 
@@ -649,6 +1042,9 @@ def apply_water_and_beach(
     noise_fine: np.ndarray,
     chunk_rows: int,
     sand_distance: float,
+    sand_texture_settings: dict | None = None,
+    water_texture_settings: dict | None = None,
+    contour_settings: dict | None = None,
 ):
     """
     Application eau / fond marin / plage avec contouring.
@@ -669,10 +1065,16 @@ def apply_water_and_beach(
 
     # Distances exprimées en pixels. Elles restent internes au rendu et ne changent
     # pas les masques d'altitude.
-    surf_width = 8.0
-    shallow_width = max(18.0, min(42.0, float(sand_distance) * 0.42))
-    mid_width = max(38.0, min(96.0, float(sand_distance) * 0.95))
-    deep_width = max(80.0, min(180.0, float(sand_distance) * 1.70))
+    contour_settings = contour_settings or {}
+    surf_width = max(1.0, float(contour_settings.get("surf_width", 8.0)))
+    shallow_factor = max(0.01, float(contour_settings.get("shallow_width_factor", 0.42)))
+    mid_factor = max(0.01, float(contour_settings.get("mid_width_factor", 0.95)))
+    deep_factor = max(0.01, float(contour_settings.get("deep_width_factor", 1.70)))
+    foam_strength = max(0.0, float(contour_settings.get("foam_strength", 1.0)))
+    wet_sand_width = max(1.0, float(contour_settings.get("wet_sand_width", WET_SAND_DISTANCE)))
+    shallow_width = max(18.0, min(42.0, float(sand_distance) * shallow_factor))
+    mid_width = max(38.0, min(96.0, float(sand_distance) * mid_factor))
+    deep_width = max(80.0, min(180.0, float(sand_distance) * deep_factor))
 
     water_deep = WATER_DEEP_RGB.astype(np.float32)
     water_mid = WATER_MID_RGB.astype(np.float32)
@@ -700,6 +1102,7 @@ def apply_water_and_beach(
         # EAU : dégradé par contouring depuis le rivage vers le large.
         # ---------------------------------------------------------
         if np.any(water_chunk):
+            water_yy, water_xx = np.where(water_chunk)
             d_land = dist_land_chunk[water_chunk]
             elev_vals = elev_chunk[water_chunk]
             slope_vals = slope_chunk[water_chunk]
@@ -716,7 +1119,7 @@ def apply_water_and_beach(
             depth_t = smoothstep01(depth / 2.2)
 
             # Fond marin visible près du rivage.
-            seabed = HP_BEACH_RGB.copy()
+            seabed = WATER_SEABED_RGB.copy()
             seabed = seabed + nl[water_chunk, None] * 0.10
             seabed = seabed + nm[water_chunk, None] * 0.08
             seabed = seabed + nf[water_chunk, None] * 0.03
@@ -734,7 +1137,7 @@ def apply_water_and_beach(
             contour_1 = make_contour_weight(d_land, surf_width * 0.85, surf_width * 0.75)
             contour_2 = make_contour_weight(d_land, shallow_width * 0.52, shallow_width * 0.28)
             contour_3 = make_contour_weight(d_land, mid_width * 0.70, mid_width * 0.22)
-            contour = np.clip(contour_1 * 0.22 + contour_2 * 0.14 + contour_3 * 0.08, 0.0, 0.34)
+            contour = np.clip((contour_1 * 0.22 + contour_2 * 0.14 + contour_3 * 0.08) * foam_strength, 0.0, 0.68)
 
             contour_color = water_surf * 0.62 + water_lagoon * 0.38
             color = color * (1.0 - contour[:, None]) + contour_color * contour[:, None]
@@ -747,6 +1150,17 @@ def apply_water_and_beach(
             # au bord, mais on évite que la texture satellite d'origine transparaisse trop.
             seabed_alpha = np.clip(0.16 * (1.0 - shallow_t) * (1.0 - depth_t * 0.55), 0.0, 0.16)
             color = color * (1.0 - seabed_alpha[:, None]) + seabed * seabed_alpha[:, None]
+
+            if water_texture_settings is not None:
+                tex_gray, tex_rgb = sample_tiled_texture_points(water_texture_settings, water_yy + y0, water_xx)
+                # Texture moins forte au large pour garder un dégradé propre, plus visible près du rivage.
+                texture_shore_boost = np.clip(1.0 - shallow_t * 0.45, 0.55, 1.0).astype(np.float32)
+                color = apply_water_texture_variation_to_colors(
+                    color,
+                    tex_gray,
+                    tex_rgb,
+                    float(water_texture_settings["strength"]),
+                ) * texture_shore_boost[:, None] + color * (1.0 - texture_shore_boost[:, None])
 
             # Mélange final plus opaque pour tous les profils.
             # Objectif : bien recouvrir la texture d'origine tout en conservant le contouring.
@@ -769,8 +1183,9 @@ def apply_water_and_beach(
 
         if np.any(sand_visible_mask):
             d = dist_beach_chunk[sand_visible_mask]
+            sand_yy, sand_xx = np.where(sand_visible_mask)
 
-            wetness = 1.0 - smoothstep01(d / max(WET_SAND_DISTANCE * 1.25, 1.0))
+            wetness = 1.0 - smoothstep01(d / max(wet_sand_width * 1.25, 1.0))
             dryness = smoothstep01(d / max(float(sand_distance), 1.0))
 
             sand_col = get_natural_sand_color_vec(
@@ -783,7 +1198,7 @@ def apply_water_and_beach(
             )
 
             # Contouring léger sur la zone humide : crée un passage plus joli entre eau et sable.
-            wet_band = make_contour_weight(d.astype(np.float32), WET_SAND_DISTANCE * 0.65, WET_SAND_DISTANCE * 0.70)
+            wet_band = make_contour_weight(d.astype(np.float32), wet_sand_width * 0.65, wet_sand_width * 0.70)
             wet_target = wet_beach + nl[sand_visible_mask, None] * 0.035 + nm[sand_visible_mask, None] * 0.045
             sand_col = sand_col * (1.0 - wet_band[:, None] * 0.32) + wet_target * (wet_band[:, None] * 0.32)
 
@@ -791,6 +1206,10 @@ def apply_water_and_beach(
             surf_band = np.clip(1.0 - d / max(3.5, 1.0), 0.0, 1.0).astype(np.float32)
             surf_col = water_surf * 0.38 + wet_beach * 0.62
             sand_col = sand_col * (1.0 - surf_band[:, None] * 0.24) + surf_col * (surf_band[:, None] * 0.24)
+
+            if sand_texture_settings is not None:
+                tex_gray, tex_rgb = sample_tiled_texture_points(sand_texture_settings, sand_yy + y0, sand_xx)
+                sand_col = apply_texture_variation_to_colors(sand_col, tex_gray, tex_rgb, float(sand_texture_settings["strength"]))
 
             core_values = sand_core_chunk[sand_visible_mask]
             edge_values = sand_edge_chunk[sand_visible_mask]
@@ -835,6 +1254,7 @@ def apply_land_side_sand_second_pass(
     land_pass_distance: float,
     land_pass_strength: float,
     land_side_mask: np.ndarray | None = None,
+    sand_texture_settings: dict | None = None,
 ):
     """
     Deuxième passe côté terre du sable - version plus courte et plus opaque.
@@ -900,6 +1320,7 @@ def apply_land_side_sand_second_pass(
 
         if np.any(outer_mask):
             d = dist_out_chunk[outer_mask]
+            outer_yy, outer_xx = np.where(outer_mask)
             t = np.clip(d / max_dist, 0.0, 1.0).astype(np.float32)
 
             # Dégradé resserré : on coupe plus vite pour éviter le halo lointain.
@@ -954,6 +1375,10 @@ def apply_land_side_sand_second_pass(
                 + land_matched * (w_far / wt)[:, None]
             )
 
+            if sand_texture_settings is not None:
+                tex_gray, tex_rgb = sample_tiled_texture_points(sand_texture_settings, outer_yy + y0, outer_xx)
+                target = apply_texture_variation_to_colors(target, tex_gray, tex_rgb, float(sand_texture_settings["strength"]) * 0.65)
+
             breakup = np.clip(0.98 + nm[outer_mask] * 0.018 + nf[outer_mask] * 0.010, 0.76, 1.06).astype(np.float32)
             slope_factor = np.clip(1.0 - slope_chunk[outer_mask] * 0.32, 0.64, 1.0).astype(np.float32)
             water_guard = np.clip((dist_water_chunk[outer_mask] / max(max_sand_dist, 1.0)), 0.66, 1.0).astype(np.float32)
@@ -983,6 +1408,7 @@ def apply_land_side_sand_second_pass(
 
         if np.any(inner_mask):
             d = dist_in_chunk[inner_mask]
+            inner_yy, inner_xx = np.where(inner_mask)
             t = np.clip(d / inner_dist, 0.0, 1.0).astype(np.float32)
             edge = (1.0 - t).astype(np.float32)
             edge_smooth = edge * edge * (3.0 - 2.0 * edge)
@@ -1004,6 +1430,10 @@ def apply_land_side_sand_second_pass(
             dry_inside = dry_inside + nm[inner_mask, None] * 0.03 + nf[inner_mask, None] * 0.01
 
             target = dune_inside * edge_smooth[:, None] + dry_inside * (1.0 - edge_smooth)[:, None]
+
+            if sand_texture_settings is not None:
+                tex_gray, tex_rgb = sample_tiled_texture_points(sand_texture_settings, inner_yy + y0, inner_xx)
+                target = apply_texture_variation_to_colors(target, tex_gray, tex_rgb, float(sand_texture_settings["strength"]) * 0.70)
 
             alpha = np.clip((0.18 + 0.36 * edge_smooth + float(land_pass_strength) * 0.06), 0.06, 0.74)[:, None]
             result = current * (1.0 - alpha) + target * alpha
@@ -1113,13 +1543,582 @@ def resolve_versioned_output_path(path_str: str) -> str:
     return str(parent / f"{base_stem}_V{max_version + 1}{ext}")
 
 
+def parse_rgb_triplet(raw: str | None, option_name: str) -> np.ndarray | None:
+    """Parse une couleur RGB au format 'R,G,B' ou '#RRGGBB'."""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+
+    if value.startswith("#"):
+        value = value[1:]
+        if len(value) != 6:
+            raise ValueError(f"{option_name} doit être au format #RRGGBB ou R,G,B.")
+        try:
+            parts = [int(value[i:i+2], 16) for i in (0, 2, 4)]
+        except ValueError as exc:
+            raise ValueError(f"{option_name} contient une couleur hexadécimale invalide.") from exc
+    else:
+        raw_parts = [p.strip() for p in value.split(",")]
+        if len(raw_parts) != 3:
+            raise ValueError(f"{option_name} doit contenir 3 valeurs RGB séparées par des virgules.")
+        try:
+            parts = [int(float(p)) for p in raw_parts]
+        except ValueError as exc:
+            raise ValueError(f"{option_name} contient une valeur RGB invalide.") from exc
+
+    if any(p < 0 or p > 255 for p in parts):
+        raise ValueError(f"{option_name} doit rester entre 0 et 255 pour chaque canal RGB.")
+
+    return np.array(parts, dtype=np.float32)
+
+
+def rgb_array_to_text(arr: np.ndarray) -> str:
+    vals = np.clip(arr.astype(np.int32), 0, 255).tolist()
+    return f"{vals[0]},{vals[1]},{vals[2]}"
+
+
+def apply_sand_color_settings(args) -> dict:
+    """Applique le preset ou les RGB custom au rendu sable/eau proche plage."""
+    global HP_BEACH_RGB, SAND_WET_RGB, SAND_DRY_RGB, SAND_SHELL_RGB, WET_BEACH_RGB
+    global BASE_COLOR_BY_CATEGORY, BASE_COLOR_ARRAY
+
+    preset_key = str(getattr(args, "sand_color_preset", "belle_ile") or "belle_ile").strip().lower()
+    if preset_key in {"default", "classic", "natural"}:
+        preset_key = "belle_ile"
+    if preset_key == "custom":
+        base = SAND_COLOR_PRESETS["belle_ile"].copy()
+    else:
+        if preset_key not in SAND_COLOR_PRESETS:
+            valid = ", ".join(sorted(list(SAND_COLOR_PRESETS.keys()) + ["custom"]))
+            raise ValueError(f"Preset couleur sable inconnu : {preset_key}. Presets disponibles : {valid}")
+        base = SAND_COLOR_PRESETS[preset_key].copy()
+
+    dry_custom = parse_rgb_triplet(getattr(args, "sand_dry_rgb", None), "--sand-dry-rgb")
+    wet_custom = parse_rgb_triplet(getattr(args, "sand_wet_rgb", None), "--sand-wet-rgb")
+    shell_custom = parse_rgb_triplet(getattr(args, "sand_shell_rgb", None), "--sand-shell-rgb")
+    wet_beach_custom = parse_rgb_triplet(getattr(args, "wet_beach_rgb", None), "--wet-beach-rgb")
+    seabed_custom = parse_rgb_triplet(getattr(args, "seabed_rgb", None), "--seabed-rgb")
+
+    # Ne jamais utiliser "array_a or array_b" avec numpy :
+    # un tableau numpy n'a pas de vérité booléenne unique.
+    dry = dry_custom if dry_custom is not None else np.array(base["dry"], dtype=np.float32)
+    wet = wet_custom if wet_custom is not None else np.array(base["wet"], dtype=np.float32)
+    shell = shell_custom if shell_custom is not None else np.array(base["shell"], dtype=np.float32)
+    wet_beach = wet_beach_custom if wet_beach_custom is not None else np.array(base["wet_beach"], dtype=np.float32)
+    seabed = seabed_custom if seabed_custom is not None else np.array(base["seabed"], dtype=np.float32)
+
+    strength = float(getattr(args, "sand_color_strength", 1.0))
+    if strength < 0.0 or strength > 1.5:
+        raise ValueError("--sand-color-strength doit être entre 0.0 et 1.5.")
+
+    # strength = 1.0 applique le preset exactement. <1 garde une partie de la palette d'origine.
+    def mix(original: np.ndarray, target: np.ndarray) -> np.ndarray:
+        return np.clip(original * (1.0 - min(strength, 1.0)) + target * min(strength, 1.0), 0, 255).astype(np.float32)
+
+    SAND_DRY_RGB = mix(SAND_DRY_RGB, dry)
+    SAND_WET_RGB = mix(SAND_WET_RGB, wet)
+    SAND_SHELL_RGB = mix(SAND_SHELL_RGB, shell)
+    WET_BEACH_RGB = mix(WET_BEACH_RGB, wet_beach)
+    HP_BEACH_RGB = mix(HP_BEACH_RGB, seabed)
+
+    # Catégories de base utilisées par la correction globale avant la passe plage.
+    BASE_COLOR_BY_CATEGORY["sand"] = SAND_DRY_RGB.copy()
+    BASE_COLOR_BY_CATEGORY["beach"] = WET_BEACH_RGB.copy()
+    BASE_COLOR_ARRAY[CAT["sand"]] = BASE_COLOR_BY_CATEGORY["sand"]
+    BASE_COLOR_ARRAY[CAT["beach"]] = BASE_COLOR_BY_CATEGORY["beach"]
+
+    return {
+        "preset": preset_key,
+        "label": "Custom RGB" if preset_key == "custom" else SAND_COLOR_PRESETS[preset_key]["label"],
+        "dry": rgb_array_to_text(SAND_DRY_RGB),
+        "wet": rgb_array_to_text(SAND_WET_RGB),
+        "shell": rgb_array_to_text(SAND_SHELL_RGB),
+        "wet_beach": rgb_array_to_text(WET_BEACH_RGB),
+        "seabed": rgb_array_to_text(HP_BEACH_RGB),
+        "strength": strength,
+    }
+
+
+
+def apply_water_color_settings(args) -> dict:
+    """Applique le preset ou les RGB custom au dégradé eau/fond marin proche plage."""
+    global WATER_DEEP_RGB, WATER_MID_RGB, WATER_SHALLOW_RGB, WATER_LAGOON_RGB, WATER_SURF_RGB, WATER_SEABED_RGB
+    global BASE_COLOR_BY_CATEGORY, BASE_COLOR_ARRAY
+
+    preset_key = str(getattr(args, "water_color_preset", "atlantic_belle_ile") or "atlantic_belle_ile").strip().lower()
+    if preset_key in {"default", "classic", "atlantic"}:
+        preset_key = "atlantic_belle_ile"
+    if preset_key == "custom":
+        base = WATER_COLOR_PRESETS["atlantic_belle_ile"].copy()
+    else:
+        if preset_key not in WATER_COLOR_PRESETS:
+            valid = ", ".join(sorted(list(WATER_COLOR_PRESETS.keys()) + ["custom"]))
+            raise ValueError(f"Preset couleur eau inconnu : {preset_key}. Presets disponibles : {valid}")
+        base = WATER_COLOR_PRESETS[preset_key].copy()
+
+    deep_custom = parse_rgb_triplet(getattr(args, "water_deep_rgb", None), "--water-deep-rgb")
+    mid_custom = parse_rgb_triplet(getattr(args, "water_mid_rgb", None), "--water-mid-rgb")
+    shallow_custom = parse_rgb_triplet(getattr(args, "water_shallow_rgb", None), "--water-shallow-rgb")
+    lagoon_custom = parse_rgb_triplet(getattr(args, "water_lagoon_rgb", None), "--water-lagoon-rgb")
+    surf_custom = parse_rgb_triplet(getattr(args, "water_surf_rgb", None), "--water-surf-rgb")
+    seabed_custom = parse_rgb_triplet(getattr(args, "water_seabed_rgb", None), "--water-seabed-rgb")
+
+    deep = deep_custom if deep_custom is not None else np.array(base["deep"], dtype=np.float32)
+    mid = mid_custom if mid_custom is not None else np.array(base["mid"], dtype=np.float32)
+    shallow = shallow_custom if shallow_custom is not None else np.array(base["shallow"], dtype=np.float32)
+    lagoon = lagoon_custom if lagoon_custom is not None else np.array(base["lagoon"], dtype=np.float32)
+    surf = surf_custom if surf_custom is not None else np.array(base["surf"], dtype=np.float32)
+    seabed = seabed_custom if seabed_custom is not None else np.array(base["seabed"], dtype=np.float32)
+
+    strength = float(getattr(args, "water_color_strength", 1.0))
+    if strength < 0.0 or strength > 1.5:
+        raise ValueError("--water-color-strength doit être entre 0.0 et 1.5.")
+
+    def mix(original: np.ndarray, target: np.ndarray) -> np.ndarray:
+        s = min(strength, 1.0)
+        return np.clip(original * (1.0 - s) + target * s, 0, 255).astype(np.float32)
+
+    WATER_DEEP_RGB = mix(WATER_DEEP_RGB, deep)
+    WATER_MID_RGB = mix(WATER_MID_RGB, mid)
+    WATER_SHALLOW_RGB = mix(WATER_SHALLOW_RGB, shallow)
+    WATER_LAGOON_RGB = mix(WATER_LAGOON_RGB, lagoon)
+    WATER_SURF_RGB = mix(WATER_SURF_RGB, surf)
+    WATER_SEABED_RGB = mix(WATER_SEABED_RGB, seabed)
+
+    BASE_COLOR_BY_CATEGORY["water"] = WATER_DEEP_RGB.copy()
+    BASE_COLOR_ARRAY[CAT["water"]] = BASE_COLOR_BY_CATEGORY["water"]
+
+    return {
+        "preset": preset_key,
+        "label": "Custom RGB" if preset_key == "custom" else WATER_COLOR_PRESETS[preset_key]["label"],
+        "deep": rgb_array_to_text(WATER_DEEP_RGB),
+        "mid": rgb_array_to_text(WATER_MID_RGB),
+        "shallow": rgb_array_to_text(WATER_SHALLOW_RGB),
+        "lagoon": rgb_array_to_text(WATER_LAGOON_RGB),
+        "surf": rgb_array_to_text(WATER_SURF_RGB),
+        "seabed": rgb_array_to_text(WATER_SEABED_RGB),
+        "strength": strength,
+    }
+
+
+
+def prepare_sand_texture_settings(args) -> dict | None:
+    """Charge une texture optionnelle pour enrichir la matière du sable sur la satmap."""
+    texture_path = str(getattr(args, "sand_texture_image", "") or "").strip()
+    if not texture_path:
+        return None
+    path = Path(texture_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Texture sable introuvable : {texture_path}")
+
+    strength = float(getattr(args, "sand_texture_strength", 0.45))
+    scale = float(getattr(args, "sand_texture_scale", 1.0))
+    if strength < 0.0 or strength > 1.0:
+        raise ValueError("--sand-texture-strength doit être entre 0.0 et 1.0.")
+    if scale < 0.1 or scale > 8.0:
+        raise ValueError("--sand-texture-scale doit être entre 0.1 et 8.0.")
+
+    img = Image.open(path).convert("RGB")
+    src_w, src_h = img.size
+    tile_w = int(np.clip(round(src_w * scale), 32, 2048))
+    tile_h = int(np.clip(round(src_h * scale), 32, 2048))
+    if (tile_w, tile_h) != (src_w, src_h):
+        img = img.resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+
+    rgb = np.asarray(img, dtype=np.float32) / 255.0
+    gray = np.dot(rgb[..., :3], np.array([0.299, 0.587, 0.114], dtype=np.float32))
+    gray_mean = float(np.mean(gray))
+    gray = np.clip((gray - gray_mean) * 1.25 + 0.5, 0.0, 1.0).astype(np.float32)
+    return {
+        "path": str(path),
+        "name": path.name,
+        "strength": strength,
+        "scale": scale,
+        "rgb": rgb.astype(np.float32),
+        "gray": gray,
+        "tile_h": int(gray.shape[0]),
+        "tile_w": int(gray.shape[1]),
+    }
+
+
+
+
+
+def prepare_water_texture_settings(args) -> dict | None:
+    """Charge une texture optionnelle pour enrichir la surface de l'eau sur la satmap.
+
+    Contrairement au sable, l'eau révèle très vite les répétitions carrées.
+    La texture eau est donc préparée avec :
+    - une tuile plus grande autorisée,
+    - un léger lissage optionnel,
+    - une répétition miroir,
+    - une déformation de coordonnées stable sur toute la carte.
+
+    Le traitement reste ensuite fait par chunks : seule la lecture de la texture
+    utilise des coordonnées globales, ce qui évite les raccords visibles.
+    """
+    texture_path = str(getattr(args, "water_texture_image", "") or "").strip()
+    if not texture_path:
+        return None
+    path = Path(texture_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Texture eau introuvable : {texture_path}")
+
+    strength = float(getattr(args, "water_texture_strength", 0.25))
+    scale = float(getattr(args, "water_texture_scale", 1.0))
+    smoothing = float(getattr(args, "water_texture_smoothing", 12.0))
+    warp = float(getattr(args, "water_texture_warp", 18.0))
+    if strength < 0.0 or strength > 1.0:
+        raise ValueError("--water-texture-strength doit être entre 0.0 et 1.0.")
+    if scale < 0.1 or scale > 8.0:
+        raise ValueError("--water-texture-scale doit être entre 0.1 et 8.0.")
+    if smoothing < 0.0 or smoothing > 64.0:
+        raise ValueError("--water-texture-smoothing doit être entre 0.0 et 64.0.")
+    if warp < 0.0 or warp > 96.0:
+        raise ValueError("--water-texture-warp doit être entre 0.0 et 96.0.")
+
+    img = Image.open(path).convert("RGB")
+    src_w, src_h = img.size
+
+    # 4096 limite la répétition visible sur une satmap 10240 sans exploser la RAM.
+    tile_w = int(np.clip(round(src_w * scale), 32, 4096))
+    tile_h = int(np.clip(round(src_h * scale), 32, 4096))
+    if (tile_w, tile_h) != (src_w, src_h):
+        img = img.resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+
+    rgb = np.asarray(img, dtype=np.float32) / 255.0
+
+    # Lissage local de la matière eau. Il ne floute pas toute la satmap,
+    # seulement la texture source, donc la génération par chunks reste inchangée.
+    if smoothing > 0.0:
+        rgb = gaussian_filter(rgb, sigma=(smoothing, smoothing, 0.0)).astype(np.float32)
+        rgb = np.clip(rgb, 0.0, 1.0)
+
+    gray = np.dot(rgb[..., :3], np.array([0.299, 0.587, 0.114], dtype=np.float32))
+    gray_mean = float(np.mean(gray))
+    gray = np.clip((gray - gray_mean) * 1.15 + 0.5, 0.0, 1.0).astype(np.float32)
+    return {
+        "path": str(path),
+        "name": path.name,
+        "strength": strength,
+        "scale": scale,
+        "smoothing": smoothing,
+        "warp": warp,
+        "wrap_mode": "mirror",
+        "rgb": rgb.astype(np.float32),
+        "gray": gray,
+        "tile_h": int(gray.shape[0]),
+        "tile_w": int(gray.shape[1]),
+    }
+
+
+def apply_water_texture_variation_to_colors(colors: np.ndarray, tex_gray: np.ndarray | None, tex_rgb: np.ndarray | None, strength: float) -> np.ndarray:
+    """Texture eau volontairement douce : nuance la couleur sans créer de carrés visibles."""
+    if tex_gray is None or tex_rgb is None or colors.size == 0 or strength <= 0.0:
+        return colors
+    detail = ((tex_gray.astype(np.float32) - 0.5) * 2.0)[:, None]
+
+    # Eau = variation très basse fréquence : moins de contraste que le sable.
+    brightness = np.clip(1.0 + detail * (0.10 * strength), 0.82, 1.16)
+    chroma = np.clip(0.94 + tex_rgb.astype(np.float32) * 0.12, 0.88, 1.08)
+    textured = colors.astype(np.float32) * brightness
+    textured = textured * (1.0 - 0.08 * strength) + (colors.astype(np.float32) * chroma) * (0.08 * strength)
+    luma = np.mean(tex_rgb.astype(np.float32), axis=1, keepdims=True)
+    textured = textured + (luma - 0.5) * (4.0 * strength)
+    return np.clip(textured, 0, 255).astype(np.float32)
+
+
+def _wrap_texture_indices(values: np.ndarray, size: int, mode: str) -> np.ndarray:
+    """Retourne des indices de texture répétables sans couture dure."""
+    size = max(1, int(size))
+    values_i = np.floor(values).astype(np.int64)
+    if size == 1:
+        return np.zeros_like(values_i, dtype=np.int64)
+
+    if mode == "mirror":
+        period = size * 2
+        mod = np.mod(values_i, period)
+        return np.where(mod < size, mod, period - mod - 1).astype(np.int64)
+
+    return np.mod(values_i, size).astype(np.int64)
+
+
+def _warp_texture_coordinates(texture_settings: dict, ys: np.ndarray, xs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Déforme très légèrement les coordonnées pour casser la lecture en grille.
+
+    La formule est déterministe et basée sur les coordonnées globales, donc elle
+    reste parfaitement stable entre deux chunks.
+    """
+    y = ys.astype(np.float32)
+    x = xs.astype(np.float32)
+    warp = float(texture_settings.get("warp", 0.0) or 0.0)
+    if warp <= 0.0:
+        return y, x
+
+    warp_y = (
+        np.sin(x * 0.0061 + y * 0.0027) * 0.55
+        + np.sin(x * 0.0019 - y * 0.0073) * 0.45
+    ) * warp
+    warp_x = (
+        np.sin(x * 0.0047 - y * 0.0059) * 0.60
+        + np.sin(x * 0.0083 + y * 0.0017) * 0.40
+    ) * warp
+    return y + warp_y.astype(np.float32), x + warp_x.astype(np.float32)
+
+
+def sample_tiled_texture_points(texture_settings: dict | None, ys: np.ndarray, xs: np.ndarray):
+    if texture_settings is None or ys.size == 0:
+        return None, None
+
+    mode = str(texture_settings.get("wrap_mode", "repeat") or "repeat").lower()
+    tile_h = int(texture_settings["tile_h"])
+    tile_w = int(texture_settings["tile_w"])
+
+    y_f, x_f = _warp_texture_coordinates(texture_settings, ys, xs)
+    y0 = np.floor(y_f).astype(np.float32)
+    x0 = np.floor(x_f).astype(np.float32)
+    wy = (y_f - y0).astype(np.float32)
+    wx = (x_f - x0).astype(np.float32)
+
+    yi0 = _wrap_texture_indices(y0, tile_h, mode)
+    xi0 = _wrap_texture_indices(x0, tile_w, mode)
+    yi1 = _wrap_texture_indices(y0 + 1.0, tile_h, mode)
+    xi1 = _wrap_texture_indices(x0 + 1.0, tile_w, mode)
+
+    gray_tex = texture_settings["gray"]
+    rgb_tex = texture_settings["rgb"]
+
+    # Bilinear sampling : évite les ruptures pixelisées dans les grandes zones d'eau.
+    g00 = gray_tex[yi0, xi0]
+    g10 = gray_tex[yi0, xi1]
+    g01 = gray_tex[yi1, xi0]
+    g11 = gray_tex[yi1, xi1]
+    gray = (
+        g00 * (1.0 - wx) * (1.0 - wy)
+        + g10 * wx * (1.0 - wy)
+        + g01 * (1.0 - wx) * wy
+        + g11 * wx * wy
+    )
+
+    wx3 = wx[:, None]
+    wy3 = wy[:, None]
+    c00 = rgb_tex[yi0, xi0]
+    c10 = rgb_tex[yi0, xi1]
+    c01 = rgb_tex[yi1, xi0]
+    c11 = rgb_tex[yi1, xi1]
+    rgb = (
+        c00 * (1.0 - wx3) * (1.0 - wy3)
+        + c10 * wx3 * (1.0 - wy3)
+        + c01 * (1.0 - wx3) * wy3
+        + c11 * wx3 * wy3
+    )
+
+    return gray.astype(np.float32), rgb.astype(np.float32)
+
+
+def apply_texture_variation_to_colors(colors: np.ndarray, tex_gray: np.ndarray | None, tex_rgb: np.ndarray | None, strength: float) -> np.ndarray:
+    if tex_gray is None or tex_rgb is None or colors.size == 0 or strength <= 0.0:
+        return colors
+    detail = ((tex_gray.astype(np.float32) - 0.5) * 2.0)[:, None]
+    brightness = np.clip(1.0 + detail * (0.34 * strength), 0.58, 1.42)
+    chroma = np.clip(0.78 + tex_rgb.astype(np.float32) * 0.44, 0.64, 1.28)
+    textured = colors.astype(np.float32) * brightness
+    textured = textured * (1.0 - 0.22 * strength) + (colors.astype(np.float32) * chroma) * (0.22 * strength)
+    luma = np.mean(tex_rgb.astype(np.float32), axis=1, keepdims=True)
+    textured = textured + (luma - 0.5) * (16.0 * strength)
+    return np.clip(textured, 0, 255).astype(np.float32)
+
+
+def print_sand_color_presets_table():
+    print("")
+    print("TABLEAU DES PRESETS COULEUR SABLE")
+    print("-" * 110)
+    print(f"{'ID':<16} {'Dry RGB':<14} {'Wet RGB':<14} {'Seabed RGB':<14} Description")
+    print("-" * 110)
+    for key, data in SAND_COLOR_PRESETS.items():
+        print(
+            f"{key:<16} "
+            f"{','.join(map(str, data['dry'])):<14} "
+            f"{','.join(map(str, data['wet'])):<14} "
+            f"{','.join(map(str, data['seabed'])):<14} "
+            f"{data['label']}"
+        )
+    print("custom           utilise --sand-dry-rgb / --sand-wet-rgb / --sand-shell-rgb / --wet-beach-rgb / --seabed-rgb")
+    print("-" * 110)
+    print("")
+
+
+def print_water_color_presets_table():
+    print("")
+    print("TABLEAU DES PRESETS COULEUR EAU")
+    print("-" * 132)
+    print(f"{'ID':<24} {'Deep RGB':<13} {'Mid RGB':<13} {'Shallow RGB':<13} {'Lagoon RGB':<13} Description")
+    print("-" * 132)
+    for key, data in WATER_COLOR_PRESETS.items():
+        print(
+            f"{key:<24} "
+            f"{','.join(map(str, data['deep'])):<13} "
+            f"{','.join(map(str, data['mid'])):<13} "
+            f"{','.join(map(str, data['shallow'])):<13} "
+            f"{','.join(map(str, data['lagoon'])):<13} "
+            f"{data['label']}"
+        )
+    print("custom                   utilise --water-deep-rgb / --water-mid-rgb / --water-shallow-rgb / --water-lagoon-rgb / --water-surf-rgb / --water-seabed-rgb")
+    print("-" * 132)
+    print("")
+
+
+
+def print_progress(percent: int | float, message: str) -> None:
+    """Ligne stable lue par le launcher : PROGRESS|pct|message."""
+    pct = int(max(0, min(100, round(float(percent)))))
+    print(f"PROGRESS|{pct}|{message}", flush=True)
+
+
+def validate_image_input(path_str: str, option_name: str) -> None:
+    path = Path(path_str)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"{option_name} introuvable : {path_str}")
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED_IMAGE_EXTENSIONS:
+        allowed = ", ".join(SUPPORTED_IMAGE_EXTENSIONS)
+        raise ValueError(f"{option_name} doit être une image supportée ({allowed}) : {path_str}")
+
+
+def validate_mask_format(path_str: str, tolerance: int | float) -> None:
+    """Bloque les masks JPG par défaut, sauf si une tolérance RGB est explicitement utilisée."""
+    ext = Path(path_str).suffix.lower()
+    if ext in LOSSY_MASK_EXTENSIONS and float(tolerance) <= 0.0:
+        allowed = ", ".join(LOSSLESS_MASK_EXTENSIONS)
+        raise ValueError(
+            "Le mask ne doit pas être en JPG/JPEG avec une tolérance RGB à 0. "
+            f"Utilise un format sans perte ({allowed}) ou active --mask-color-tolerance."
+        )
+
+
+def verify_image_can_open(path_str: str, option_name: str) -> tuple[int, int]:
+    validate_image_input(path_str, option_name)
+    with Image.open(path_str) as img:
+        img.verify()
+    with Image.open(path_str) as img:
+        return img.size
+
+
+def read_asc_header_only(path_str: str) -> dict:
+    header = {}
+    with open(path_str, "r", encoding="utf-8") as f:
+        for _ in range(6):
+            line = f.readline()
+            if not line:
+                raise ValueError("Header ASC incomplet.")
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                header[parts[0].lower()] = float(parts[1])
+    return header
+
+
+def save_debug_bool(path: Path, arr: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray((arr.astype(np.uint8) * 255)).save(path)
+
+
+def save_debug_float(path: Path, arr: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = arr.astype(np.float32)
+    finite = np.isfinite(data)
+    if np.any(finite):
+        amin = float(np.nanmin(data[finite]))
+        amax = float(np.nanmax(data[finite]))
+        if amax - amin > 1e-8:
+            out = ((data - amin) / (amax - amin) * 255.0)
+        else:
+            out = np.zeros_like(data, dtype=np.float32)
+    else:
+        out = np.zeros_like(data, dtype=np.float32)
+    out[~finite] = 0.0
+    Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(path)
+
+
+def save_debug_category_map(path: Path, category_id: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    colors = np.array([
+        [135, 120, 85],   # field
+        [95, 128, 78],    # grass
+        [72, 96, 58],     # forest
+        [140, 105, 70],   # earth
+        [122, 120, 114],  # rock
+        [210, 196, 168],  # sand
+        [182, 150, 118],  # beach
+        [122, 116, 104],  # gravel
+        [70, 70, 70],     # road
+        [58, 92, 130],    # water
+        [120, 120, 120],  # other
+    ], dtype=np.uint8)
+    Image.fromarray(colors[np.clip(category_id, 0, len(colors) - 1)]).save(path)
+
+
+def write_generation_report(args, started_at: datetime, finished_at: datetime, extra: dict) -> None:
+    output_dir = Path(args.output_satmap).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    duration = max(0.0, (finished_at - started_at).total_seconds())
+    arg_data = vars(args).copy()
+    data = {
+        "generator_version": GENERATOR_VERSION,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": round(duration, 3),
+        "outputs": {
+            "satmap": str(args.output_satmap),
+            "beach_mask": str(args.output_beach_mask),
+            "report": str(output_dir / REPORT_FILE_NAME),
+            "settings_json": str(output_dir / SETTINGS_JSON_NAME),
+        },
+        "arguments": arg_data,
+        "summary": extra,
+    }
+    (output_dir / SETTINGS_JSON_NAME).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Rapport complet de génération Satmap",
+        "",
+        f"Date de génération : `{finished_at.strftime('%Y-%m-%d %H:%M:%S')}`",
+        f"Durée totale : `{duration:.1f} sec`",
+        f"Version générateur : `{GENERATOR_VERSION}`",
+        f"Dossier de sortie : `{output_dir}`",
+        "",
+        "## Fichiers source",
+        "",
+        f"- Heightmap ASC : `{args.heightmap}`",
+        f"- Mask image : `{args.mask}`",
+        f"- Satmap image : `{args.satmap}`",
+        f"- Layers CFG : `{args.layers}`",
+        "",
+        "## Sorties",
+        "",
+        f"- Satmap : `{args.output_satmap}`",
+        f"- Beach mask : `{args.output_beach_mask}`",
+        f"- Réglages JSON : `{SETTINGS_JSON_NAME}`",
+        "",
+        "## Réglages principaux",
+        "",
+    ]
+    for key, value in extra.items():
+        lines.append(f"- {key} : `{value}`")
+    lines += ["", "## Commande / arguments", "", "```json", json.dumps(arg_data, ensure_ascii=False, indent=2), "```", ""]
+    (output_dir / REPORT_FILE_NAME).write_text("\n".join(lines), encoding="utf-8")
+    print(f"Rapport complet créé : {output_dir / REPORT_FILE_NAME}")
+    print(f"Réglages JSON créés : {output_dir / SETTINGS_JSON_NAME}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Générateur de satmap optimisé/vectorisé pour DayZ."
     )
     parser.add_argument("--heightmap", default=DEFAULT_HEIGHTMAP_PATH, help="Chemin vers heightmap.asc")
-    parser.add_argument("--mask", default=DEFAULT_MASK_PATH, help="Chemin vers mask.png")
-    parser.add_argument("--satmap", default=DEFAULT_SATMAP_PATH, help="Chemin vers satmap.png")
+    parser.add_argument("--mask", default=DEFAULT_MASK_PATH, help="Chemin vers mask image (.png, .jpg, .jpeg, .bmp, .tif, .tiff)")
+    parser.add_argument("--satmap", default=DEFAULT_SATMAP_PATH, help="Chemin vers satmap image (.png, .jpg, .jpeg, .bmp, .tif, .tiff)")
     parser.add_argument("--layers", default=DEFAULT_LAYERS_CFG_PATH, help="Chemin vers layers.cfg")
     parser.add_argument("--output-satmap", default=DEFAULT_OUTPUT_SATMAP, help="Image satmap finale")
     parser.add_argument("--output-beach-mask", default=DEFAULT_OUTPUT_BEACH_MASK, help="Masque plage/eau final")
@@ -1127,11 +2126,26 @@ def parse_args():
     parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS, help="Nombre de lignes traitées par chunk")
     parser.add_argument("--block-size", type=int, default=32, help="Taille des blocs de correction couleur")
 
+    parser.add_argument("--validate-only", action="store_true", help="Diagnostic complet sans génération de fichiers")
+    parser.add_argument("--debug-masks", action="store_true", help="Génère des images de debug dans output_Vx/debug_masks")
+    parser.add_argument("--no-report", action="store_true", help="Désactive le rapport Markdown/JSON écrit par le générateur")
+    parser.add_argument("--mask-color-tolerance", type=float, default=0.0, help="Tolérance RGB pour associer un mask compressé aux couleurs de layers.cfg. 0 = exact, JPG bloqué")
+
     # Utilisation simple via tableau de presets.
     parser.add_argument(
         "--list-sand-presets",
         action="store_true",
         help="Affiche le tableau des presets sand puis quitte"
+    )
+    parser.add_argument(
+        "--list-sand-color-presets",
+        action="store_true",
+        help="Affiche le tableau des presets couleur sable puis quitte"
+    )
+    parser.add_argument(
+        "--list-water-color-presets",
+        action="store_true",
+        help="Affiche le tableau des presets couleur eau puis quitte"
     )
     parser.add_argument(
         "--sand-preset",
@@ -1153,17 +2167,65 @@ def parse_args():
     parser.add_argument("--sand-layer-names", default=DEFAULT_SAND_SOURCE_LAYER_NAMES, help="Noms des textures/layers utilisés comme zone source du sable, séparés par virgules")
     parser.add_argument("--land-layer-names", default=DEFAULT_LAND_SIDE_LAYER_NAMES, help="Optionnel : noms des textures/layers limitant la transition côté terre, séparés par virgules. Vide = comportement précédent")
 
+    parser.add_argument("--sand-color-preset", default="belle_ile", help="Preset couleur sable : belle_ile, atlantic_light, golden, pale_white, grey_shell, dark_volcanic, red_ochre ou custom")
+    parser.add_argument("--sand-color-strength", type=float, default=1.0, help="Force d'application de la palette sable, 0.0 à 1.5. Défaut : 1.0")
+    parser.add_argument("--sand-dry-rgb", default=None, help="Couleur sable sec custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--sand-wet-rgb", default=None, help="Couleur sable humide custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--sand-shell-rgb", default=None, help="Couleur coquillage/variation claire custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--wet-beach-rgb", default=None, help="Couleur bord humide / wet beach custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--seabed-rgb", default=None, help="Couleur fond marin visible près de la plage au format R,G,B ou #RRGGBB")
+    parser.add_argument("--sand-texture-image", default="", help="Image de texture optionnelle pour enrichir visuellement le sable sur la satmap")
+    parser.add_argument("--sand-texture-strength", type=float, default=0.45, help="Force de la texture sable, 0.0 à 1.0. Défaut : 0.45")
+    parser.add_argument("--sand-texture-scale", type=float, default=1.0, help="Échelle de répétition de la texture sable. 1.0 = taille d'origine")
+
+    parser.add_argument("--water-texture-image", default="", help="Image de texture optionnelle pour enrichir visuellement l'eau sur la satmap")
+    parser.add_argument("--water-texture-strength", type=float, default=0.25, help="Force de la texture eau, 0.0 à 1.0. Défaut : 0.25")
+    parser.add_argument("--water-texture-scale", type=float, default=1.0, help="Échelle de répétition de la texture eau. 1.0 = taille d'origine")
+    parser.add_argument("--water-texture-smoothing", type=float, default=12.0, help="Lissage de la texture eau avant application, 0.0 à 64.0. Défaut : 12.0")
+    parser.add_argument("--water-texture-warp", type=float, default=18.0, help="Déformation douce des coordonnées de texture eau, 0.0 à 96.0. Défaut : 18.0")
+
+    parser.add_argument("--surf-width", type=float, default=8.0, help="Largeur du liseré de ressac en pixels")
+    parser.add_argument("--shallow-width-factor", type=float, default=0.42, help="Facteur de largeur de l'eau peu profonde basé sur sand-distance")
+    parser.add_argument("--mid-width-factor", type=float, default=0.95, help="Facteur de largeur de l'eau moyenne basé sur sand-distance")
+    parser.add_argument("--deep-width-factor", type=float, default=1.70, help="Facteur de largeur de l'eau profonde basé sur sand-distance")
+    parser.add_argument("--foam-strength", type=float, default=1.0, help="Force visuelle du ressac/contouring, 0.0 à 2.0")
+    parser.add_argument("--wet-sand-width", type=float, default=float(WET_SAND_DISTANCE), help="Largeur du sable humide en pixels")
+
+    parser.add_argument("--water-color-preset", default="atlantic_belle_ile", help="Preset couleur eau. Utilise --list-water-color-presets pour voir tous les choix, ou custom")
+    parser.add_argument("--water-color-strength", type=float, default=1.0, help="Force d'application de la palette eau, 0.0 à 1.5. Défaut : 1.0")
+    parser.add_argument("--water-deep-rgb", default=None, help="Couleur eau profonde custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--water-mid-rgb", default=None, help="Couleur eau moyenne custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--water-shallow-rgb", default=None, help="Couleur eau peu profonde custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--water-lagoon-rgb", default=None, help="Couleur lagon / bord clair custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--water-surf-rgb", default=None, help="Couleur ressac / écume custom au format R,G,B ou #RRGGBB")
+    parser.add_argument("--water-seabed-rgb", default=None, help="Teinte fond marin sous l'eau au format R,G,B ou #RRGGBB")
+
     return parser.parse_args()
 
 
 def main():
     global CLEAN_CUTOFF_METERS, SEA_LEVEL_METERS
+    started_at = datetime.now()
     args = parse_args()
     print(f"Générateur Satmap v{GENERATOR_VERSION}")
+    print_progress(1, "Démarrage")
 
     if args.list_sand_presets:
         print_sand_presets_table()
         return
+
+    if args.list_sand_color_presets:
+        print_sand_color_presets_table()
+        return
+
+    if args.list_water_color_presets:
+        print_water_color_presets_table()
+        return
+
+    sand_color_settings = apply_sand_color_settings(args)
+    water_color_settings = apply_water_color_settings(args)
+    sand_texture_settings = prepare_sand_texture_settings(args)
+    water_texture_settings = prepare_water_texture_settings(args)
 
     selected_preset = resolve_sand_preset(args.sand_preset)
     if selected_preset is None:
@@ -1185,35 +2247,33 @@ def main():
     land_start_level = float(args.land_start_level)
     land_pass_distance = float(args.land_pass_distance)
     land_pass_strength = float(args.land_pass_strength)
+    mask_color_tolerance = float(args.mask_color_tolerance)
     beach_layer_names = parse_layer_name_list(args.beach_layer_names)
     sand_source_layer_names = parse_layer_name_list(args.sand_layer_names)
     land_side_layer_names = parse_layer_name_list(args.land_layer_names)
+
+    target_size = int(args.target_size)
+    chunk_rows = int(args.chunk_rows)
 
     if not beach_layer_names:
         raise ValueError("--beach-layer-names doit contenir au moins un nom de layer.")
     if not sand_source_layer_names:
         raise ValueError("--sand-layer-names doit contenir au moins un nom de layer source pour le sable.")
 
-    if args.output_satmap == DEFAULT_OUTPUT_SATMAP and args.output_beach_mask == DEFAULT_OUTPUT_BEACH_MASK:
-        output_dir = create_versioned_output_dir(Path("outputs"))
-        args.output_satmap = str(output_dir / DEFAULT_OUTPUT_SATMAP)
-        args.output_beach_mask = str(output_dir / DEFAULT_OUTPUT_BEACH_MASK)
-    else:
-        args.output_satmap = resolve_versioned_output_path(args.output_satmap)
-        args.output_beach_mask = resolve_versioned_output_path(args.output_beach_mask)
-
-    random.seed(SEED)
-    np.random.seed(SEED)
-
     for p in [args.heightmap, args.mask, args.satmap, args.layers]:
         if not Path(p).exists():
             raise FileNotFoundError(f"Fichier introuvable : {p}")
 
-    target_size = int(args.target_size)
-    chunk_rows = int(args.chunk_rows)
+    validate_image_input(args.mask, "--mask")
+    validate_image_input(args.satmap, "--satmap")
+    validate_mask_format(args.mask, mask_color_tolerance)
 
+    if target_size < 512 or target_size > 30000:
+        raise ValueError("--target-size doit être entre 512 et 30000.")
     if chunk_rows <= 0:
         raise ValueError("--chunk-rows doit être supérieur à 0.")
+    if args.block_size < 4 or args.block_size > 512:
+        raise ValueError("--block-size doit être entre 4 et 512.")
     if sand_distance <= 0:
         raise ValueError("--sand-distance doit être supérieur à 0.")
     if sand_slope_max <= 0:
@@ -1228,6 +2288,66 @@ def main():
         raise ValueError(f"--land-pass-distance doit être entre 0 et {LAND_PASS_DISTANCE_MAX}.")
     if land_pass_strength < 0 or land_pass_strength > LAND_PASS_STRENGTH_MAX:
         raise ValueError(f"--land-pass-strength doit être entre 0 et {LAND_PASS_STRENGTH_MAX}.")
+    if mask_color_tolerance < 0 or mask_color_tolerance > 64:
+        raise ValueError("--mask-color-tolerance doit être entre 0 et 64.")
+    if args.surf_width < 1 or args.surf_width > 128:
+        raise ValueError("--surf-width doit être entre 1 et 128.")
+    if args.shallow_width_factor <= 0 or args.mid_width_factor <= 0 or args.deep_width_factor <= 0:
+        raise ValueError("Les facteurs de contouring doivent être supérieurs à 0.")
+    if args.foam_strength < 0 or args.foam_strength > 2:
+        raise ValueError("--foam-strength doit être entre 0 et 2.")
+    if args.wet_sand_width < 1 or args.wet_sand_width > 128:
+        raise ValueError("--wet-sand-width doit être entre 1 et 128.")
+
+    print_progress(3, "Validation")
+    print("Lecture layers.cfg...")
+    color_to_layer, _ = parse_layers_cfg_legend(args.layers)
+    available_layers = set(color_to_layer.values())
+    missing_beach = sorted([n for n in beach_layer_names if n not in {x.lower() for x in available_layers}])
+    missing_sand = sorted([n for n in sand_source_layer_names if n not in {x.lower() for x in available_layers}])
+    if missing_beach:
+        print(f"ATTENTION : layers plage non trouvés dans layers.cfg : {', '.join(missing_beach)}")
+    if missing_sand:
+        print(f"ATTENTION : layers source sable non trouvés dans layers.cfg : {', '.join(missing_sand)}")
+
+    if args.validate_only:
+        print_progress(10, "Diagnostic fichiers")
+        header = read_asc_header_only(args.heightmap)
+        mask_size = verify_image_can_open(args.mask, "--mask")
+        satmap_size = verify_image_can_open(args.satmap, "--satmap")
+        estimated_output_gb = (target_size * target_size * 3 * 4) / (1024 ** 3)
+        estimated_u8_gb = (target_size * target_size * 3) / (1024 ** 3)
+        print("DIAGNOSTIC COMPLET")
+        print(f"  heightmap header    : {header}")
+        print(f"  mask size           : {mask_size}")
+        print(f"  satmap size         : {satmap_size}")
+        print(f"  layers détectés     : {len(available_layers)}")
+        print(f"  mask tolerance RGB  : {mask_color_tolerance}")
+        print(f"  estimation output   : {estimated_output_gb:.2f} Go float32 + {estimated_u8_gb:.2f} Go uint8")
+        print_progress(100, "Diagnostic terminé")
+        print("Diagnostic terminé : configuration valide.")
+        return
+
+    if args.output_satmap == DEFAULT_OUTPUT_SATMAP and args.output_beach_mask == DEFAULT_OUTPUT_BEACH_MASK:
+        output_dir = create_versioned_output_dir(Path("outputs"))
+        args.output_satmap = str(output_dir / DEFAULT_OUTPUT_SATMAP)
+        args.output_beach_mask = str(output_dir / DEFAULT_OUTPUT_BEACH_MASK)
+    else:
+        args.output_satmap = resolve_versioned_output_path(args.output_satmap)
+        args.output_beach_mask = resolve_versioned_output_path(args.output_beach_mask)
+        output_dir = Path(args.output_satmap).parent
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+
+    contour_settings = {
+        "surf_width": float(args.surf_width),
+        "shallow_width_factor": float(args.shallow_width_factor),
+        "mid_width_factor": float(args.mid_width_factor),
+        "deep_width_factor": float(args.deep_width_factor),
+        "foam_strength": float(args.foam_strength),
+        "wet_sand_width": float(args.wet_sand_width),
+    }
 
     print("Preset sand :")
     print(f"  preset             : {selected_preset['id']} - {selected_preset['name']}")
@@ -1241,23 +2361,57 @@ def main():
     print("Deuxième passe terre :")
     print(f"  distance transition: {land_pass_distance} px")
     print(f"  force transition   : {land_pass_strength}")
+    print("Contouring eau / plage :")
+    for k, v in contour_settings.items():
+        print(f"  {k:22}: {v}")
+    print("Couleur sable satmap :")
+    print(f"  preset couleur     : {sand_color_settings['preset']} - {sand_color_settings['label']}")
+    print(f"  force couleur      : {sand_color_settings['strength']}")
+    print(f"  sable sec RGB      : {sand_color_settings['dry']}")
+    print(f"  sable humide RGB   : {sand_color_settings['wet']}")
+    print(f"  bord humide RGB    : {sand_color_settings['wet_beach']}")
+    print(f"  fond marin RGB     : {sand_color_settings['seabed']}")
+    if sand_texture_settings is not None:
+        print("Texture sable satmap :")
+        print(f"  image texture      : {sand_texture_settings['name']}")
+        print(f"  force texture      : {sand_texture_settings['strength']}")
+        print(f"  échelle texture    : {sand_texture_settings['scale']}")
+    else:
+        print("Texture sable satmap : désactivée")
+    print("Couleur eau satmap :")
+    print(f"  preset eau         : {water_color_settings['preset']} - {water_color_settings['label']}")
+    print(f"  force eau          : {water_color_settings['strength']}")
+    print(f"  eau profonde RGB   : {water_color_settings['deep']}")
+    print(f"  eau moyenne RGB    : {water_color_settings['mid']}")
+    print(f"  eau peu profonde RGB: {water_color_settings['shallow']}")
+    print(f"  lagon RGB          : {water_color_settings['lagoon']}")
+    print(f"  ressac RGB         : {water_color_settings['surf']}")
+    print(f"  fond marin eau RGB : {water_color_settings['seabed']}")
+    if water_texture_settings is not None:
+        print("Texture eau satmap :")
+        print(f"  image texture eau : {water_texture_settings['name']}")
+        print(f"  force texture eau : {water_texture_settings['strength']}")
+        print(f"  échelle texture eau: {water_texture_settings['scale']}")
+        print(f"  lissage texture eau: {water_texture_settings['smoothing']}")
+        print(f"  déformation texture: {water_texture_settings['warp']}")
+    else:
+        print("Texture eau satmap : désactivée")
     print("Textures / layers.cfg :")
     print(f"  layers plage       : {', '.join(sorted(beach_layer_names))}")
     print(f"  layers source sable: {', '.join(sorted(sand_source_layer_names))}")
     if land_side_layer_names:
-        print(f"  layers côté terre : {", ".join(sorted(land_side_layer_names))}")
+        print(f"  layers côté terre : {', '.join(sorted(land_side_layer_names))}")
     else:
         print("  layers côté terre : non utilisé (comportement précédent)")
     print("Sorties :")
     print(f"  satmap             : {args.output_satmap}")
     print(f"  beach mask         : {args.output_beach_mask}")
 
-    print("Lecture layers.cfg...")
-    color_to_layer, _ = parse_layers_cfg_legend(args.layers)
-
+    print_progress(10, "Chargement heightmap")
     print("Chargement heightmap ASC...")
     header, elev_raw = load_asc_with_header(args.heightmap)
 
+    print_progress(16, "Redimensionnement heightmap")
     print("Resize heightmap en mètres...")
     valid_mask = np.isfinite(elev_raw)
     fill_value = float(np.nanmin(elev_raw[valid_mask])) if np.any(valid_mask) else 0.0
@@ -1265,6 +2419,7 @@ def main():
     elev_m = resize_float_array(elev_fill, target_size)
     height_norm = normalize_nan_safe(elev_m)
 
+    print_progress(24, "Chargement mask")
     print("Chargement mask...")
     mask = np.asarray(
         Image.open(args.mask).convert("RGB").resize(
@@ -1274,6 +2429,7 @@ def main():
         dtype=np.uint8
     )
 
+    print_progress(32, "Chargement satmap")
     print("Chargement satmap...")
     output = np.asarray(
         Image.open(args.satmap).convert("RGB").resize(
@@ -1285,9 +2441,7 @@ def main():
 
     h, w = elev_m.shape
 
-    # =========================================================
-    # SLOPE
-    # =========================================================
+    print_progress(40, "Calcul pente")
     print("Calcul pente...")
     cellsize = header.get("cellsize", 1.0)
     scale_x = (elev_raw.shape[1] / target_size) * cellsize
@@ -1299,52 +2453,54 @@ def main():
     del gy, gx
     gc.collect()
 
-    # =========================================================
-    # MASK -> CATEGORIES
-    # =========================================================
-    category_id, hp_sand_exact_mask, land_side_exact_mask = build_category_map(mask, color_to_layer, beach_layer_names, sand_source_layer_names, land_side_layer_names)
+    print_progress(46, "Construction des catégories")
+    category_id, hp_sand_exact_mask, land_side_exact_mask = build_category_map(mask, color_to_layer, beach_layer_names, sand_source_layer_names, land_side_layer_names, mask_color_tolerance=mask_color_tolerance)
     if not np.any(hp_sand_exact_mask):
-        available_layers = ", ".join(sorted(set(color_to_layer.values())))
+        available_layers_text = ", ".join(sorted(set(color_to_layer.values())))
         raise ValueError(
             "Aucune texture source sable trouvée dans le mask/layers.cfg. "
-            f"Vérifie --sand-layer-names. Layers disponibles : {available_layers}"
+            f"Vérifie --sand-layer-names. Layers disponibles : {available_layers_text}"
         )
     if land_side_layer_names and not np.any(land_side_exact_mask):
-        available_layers = ", ".join(sorted(set(color_to_layer.values())))
+        available_layers_text = ", ".join(sorted(set(color_to_layer.values())))
         print(
             "ATTENTION : aucune texture côté terre trouvée dans le mask/layers.cfg. "
             "La deuxième passe côté terre fonctionnera comme précédemment. "
-            f"Vérifie --land-layer-names si besoin. Layers disponibles : {available_layers}"
+            f"Vérifie --land-layer-names si besoin. Layers disponibles : {available_layers_text}"
         )
         land_side_exact_mask = None
     elif not land_side_layer_names:
         land_side_exact_mask = None
 
+    debug_dir = Path(args.output_satmap).parent / "debug_masks"
+    if args.debug_masks:
+        print("Debug masks : sauvegarde category_map...")
+        save_debug_category_map(debug_dir / "debug_category_map.png", category_id)
+
     del mask
     gc.collect()
 
+    print_progress(52, "Extension zone sable")
     print("Extension locale de la zone source sable autorisée...")
     hp_sand_allowed_mask = dilate_mask(hp_sand_exact_mask, radius=8)
     del hp_sand_exact_mask
     gc.collect()
 
-    # =========================================================
-    # WATER / CLEAN CUT
-    # =========================================================
+    print_progress(58, "Détection niveaux eau")
     print(f"Détection eau / terre : eau forte < {CLEAN_CUTOFF_METERS}m, eau <= {SEA_LEVEL_METERS}m, terre > {land_start_level}m...")
     finite_elev = np.isfinite(elev_m)
     below_zero_mask = finite_elev & (elev_m < CLEAN_CUTOFF_METERS)
     water_mask = finite_elev & (elev_m <= SEA_LEVEL_METERS)
 
+    print_progress(62, "Calcul distance au rivage")
     print("Distance au rivage optimisée...")
     dist_to_water = distance_transform_edt(~water_mask).astype(np.float32)
 
+    print_progress(68, "Création du bruit")
     print("Création bruit multi-échelle...")
     noise_large, noise_medium, noise_fine = build_multiscale_noise(w, h)
 
-    # =========================================================
-    # SATMAP BASE CORRECTION
-    # =========================================================
+    print_progress(74, "Correction satmap")
     apply_base_satmap_correction(
         output=output,
         category_id=category_id,
@@ -1358,9 +2514,7 @@ def main():
         chunk_rows=chunk_rows,
     )
 
-    # =========================================================
-    # HP_SAND VECTORISÉ
-    # =========================================================
+    print_progress(78, "Génération rivage")
     print("Génération textures plage + sable vectorisée...")
     allowed_for_sand_ids = np.array([
         CAT["sand"],
@@ -1372,6 +2526,8 @@ def main():
     ], dtype=np.uint8)
 
     allowed_for_sand = np.isin(category_id, allowed_for_sand_ids)
+    if args.debug_masks:
+        save_debug_bool(debug_dir / "debug_allowed_for_sand.png", allowed_for_sand)
     del category_id
     gc.collect()
 
@@ -1389,6 +2545,8 @@ def main():
     gc.collect()
 
     hp_sand_mask = (hp_sand_bool.astype(np.uint8) * 255)
+    if args.debug_masks:
+        save_debug_bool(debug_dir / "debug_hp_sand_bool.png", hp_sand_bool)
     del hp_sand_bool
     gc.collect()
 
@@ -1406,9 +2564,18 @@ def main():
     sand_core = np.minimum(sand_core, sand_edge + 0.35).astype(np.float32)
     np.clip(sand_core, 0.0, 1.0, out=sand_core)
 
-    # =========================================================
-    # APPLICATION VISUELLE
-    # =========================================================
+    if args.debug_masks:
+        print("Debug masks : sauvegarde masques principaux...")
+        save_debug_bool(debug_dir / "debug_water_mask.png", water_mask)
+        save_debug_bool(debug_dir / "debug_below_zero_mask.png", below_zero_mask)
+        save_debug_float(debug_dir / "debug_slope.png", slope)
+        save_debug_float(debug_dir / "debug_dist_to_water.png", dist_to_water)
+        save_debug_float(debug_dir / "debug_sand_core.png", sand_core)
+        save_debug_float(debug_dir / "debug_sand_edge.png", sand_edge)
+        if land_side_exact_mask is not None:
+            save_debug_bool(debug_dir / "debug_land_side_mask.png", land_side_exact_mask)
+
+    print_progress(82, "Application eau / plage")
     apply_water_and_beach(
         output=output,
         elev_m=elev_m,
@@ -1423,8 +2590,12 @@ def main():
         noise_fine=noise_fine,
         chunk_rows=chunk_rows,
         sand_distance=sand_distance,
+        sand_texture_settings=sand_texture_settings,
+        water_texture_settings=water_texture_settings,
+        contour_settings=contour_settings,
     )
 
+    print_progress(88, "Application côté terre")
     apply_land_side_sand_second_pass(
         output=output,
         elev_m=elev_m,
@@ -1441,17 +2612,17 @@ def main():
         land_pass_distance=land_pass_distance,
         land_pass_strength=land_pass_strength,
         land_side_mask=land_side_exact_mask,
+        sand_texture_settings=sand_texture_settings,
     )
 
-    # =========================================================
-    # FINAL MASK OUTPUT
-    # =========================================================
+    print_progress(94, "Création beach mask")
     print("Création beach mask...")
     beach_mask_out = np.zeros((h, w), dtype=np.uint8)
     beach_mask_out[water_mask] = 128
     beach_mask_out[sand_edge > 0.05] = 255
     beach_mask_out[below_zero_mask] = 128
 
+    print_progress(96, "Sauvegarde beach mask")
     print(f"Sauvegarde beach mask : {args.output_beach_mask}")
     Image.fromarray(beach_mask_out).save(args.output_beach_mask)
 
@@ -1462,11 +2633,27 @@ def main():
     del noise_large, noise_medium, noise_fine
     gc.collect()
 
-    # =========================================================
-    # FINALIZE
-    # =========================================================
+    print_progress(98, "Sauvegarde satmap")
     save_output_chunked(output, args.output_satmap, chunk_rows)
 
+    report_extra = {
+        "preset_sand": f"{selected_preset['id']} - {selected_preset['name']}",
+        "sand_distance": sand_distance,
+        "sand_slope_max": sand_slope_max,
+        "sand_max_height": sand_max_height,
+        "water_start_level": CLEAN_CUTOFF_METERS,
+        "water_end_level": SEA_LEVEL_METERS,
+        "land_start_level": land_start_level,
+        "land_pass_distance": land_pass_distance,
+        "land_pass_strength": land_pass_strength,
+        "mask_color_tolerance": mask_color_tolerance,
+        "debug_masks": bool(args.debug_masks),
+        **contour_settings,
+    }
+    if not args.no_report:
+        write_generation_report(args, started_at, datetime.now(), report_extra)
+
+    print_progress(100, "Terminé")
     print("Terminé.")
     print(f"Satmap : {args.output_satmap}")
     print(f"Beach mask : {args.output_beach_mask}")

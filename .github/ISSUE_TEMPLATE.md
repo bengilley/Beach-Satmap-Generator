@@ -1,8 +1,16 @@
 ## Bug report
 
-### Launcher version
+### Versions
 
-Example: v1.2.6
+Launcher version:
+
+```text
+v1.7.7
+
+Generator version:
+
+```text
+v1.3.5
 
 ### Python version
 
